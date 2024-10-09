@@ -1,5 +1,4 @@
 import { useChatContext } from "@/lib/context";
-import { useRecordVoice } from "@/lib/hooks";
 import { formatTickerTime } from "@/lib/utils/utils";
 import {
   AudioVisualizer,
@@ -13,6 +12,7 @@ import {
 } from "@/ui";
 import { Check, Circle, X } from "lucide-react";
 import { FC, useEffect, useState } from "react";
+import axios from "axios";
 
 export type TAudioRecorder = {
   sendMessage: (message: string) => void;
@@ -23,22 +23,76 @@ export const AudioRecorder: FC<TAudioRecorder> = ({ sendMessage }) => {
   const session = store((state) => state.session);
   const editor = store((state) => state.editor);
 
-  const {
-    stream,
-    elapsedTime,
-    stopRecording,
-    recording,
-    transcribing,
-    text,
-    cancelRecording,
-    startVoiceRecording,
-  } = useRecordVoice();
-
+  const [recording, setRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const [elapsedTime, setElapsedTime] = useState(0);
+  const [text, setText] = useState("");
+  const [stream, setStream] = useState<MediaStream | null>(null);
   const [portalElement, setPortalElement] = useState<HTMLElement | null>(null);
 
   useEffect(() => {
     setPortalElement(document.body);
   }, []);
+
+  // AssemblyAI WebSocket URL for real-time transcription
+  const ASSEMBLYAI_REALTIME_URL = 'wss://api.assemblyai.com/v2/realtime/ws?sample_rate=16000';
+  const API_KEY = '7cdbbc6426df4774af5ce404c6b8948a'; // Already integrated AssemblyAI API key
+
+  const startVoiceRecording = async () => {
+    setRecording(true);
+    const mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    setStream(mediaStream);
+
+    const mediaRecorder = new MediaRecorder(mediaStream);
+    const audioChunks: Blob[] = [];
+
+    const socket = new WebSocket(ASSEMBLYAI_REALTIME_URL, ['authorization', API_KEY]);
+
+    socket.onopen = () => {
+      console.log("WebSocket connection established for real-time transcription.");
+    };
+
+    socket.onmessage = (message) => {
+      const response = JSON.parse(message.data);
+      if (response.text) {
+        if (response.message_type === "PartialTranscript") {
+          console.log("Partial:", response.text);
+        } else if (response.message_type === "FinalTranscript") {
+          setText(response.text); // Set the final transcript
+          console.log("Final:", response.text);
+        }
+      }
+    };
+
+    socket.onerror = (error) => {
+      console.error("WebSocket error:", error);
+    };
+
+    socket.onclose = () => {
+      console.log("WebSocket connection closed.");
+    };
+
+    mediaRecorder.addEventListener("dataavailable", (event) => {
+      audioChunks.push(event.data);
+    });
+
+    mediaRecorder.start();
+
+    mediaRecorder.addEventListener("stop", async () => {
+      const audioBlob = new Blob(audioChunks, { type: "audio/wav" });
+      const audioArrayBuffer = await audioBlob.arrayBuffer();
+      const audioBuffer = new Uint8Array(audioArrayBuffer);
+
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(audioBuffer);
+      }
+    });
+
+    setTimeout(() => {
+      mediaRecorder.stop();
+      setRecording(false);
+    }, 60000); // Automatically stop after 1 minute
+  };
 
   useEffect(() => {
     if (text && session) {
@@ -47,14 +101,6 @@ export const AudioRecorder: FC<TAudioRecorder> = ({ sendMessage }) => {
       sendMessage(text);
     }
   }, [text]);
-
-  useEffect(() => {
-    if (transcribing) {
-      editor?.setEditable(false);
-    } else {
-      editor?.setEditable(true);
-    }
-  }, [transcribing]);
 
   return (
     <Flex>
@@ -83,7 +129,7 @@ export const AudioRecorder: FC<TAudioRecorder> = ({ sendMessage }) => {
       <Dialog
         open={recording}
         onOpenChange={() => {
-          cancelRecording();
+          setRecording(false);
         }}
       >
         <DialogContent ariaTitle="Record Voice" className="!max-w-[400px]">
@@ -117,7 +163,7 @@ export const AudioRecorder: FC<TAudioRecorder> = ({ sendMessage }) => {
                   rounded="full"
                   size="lg"
                   onClick={() => {
-                    cancelRecording();
+                    setRecording(false);
                   }}
                   className="group"
                 >
@@ -128,7 +174,7 @@ export const AudioRecorder: FC<TAudioRecorder> = ({ sendMessage }) => {
                   rounded="full"
                   size="lg"
                   onClick={() => {
-                    stopRecording();
+                    setRecording(false);
                   }}
                   className="group"
                 >
